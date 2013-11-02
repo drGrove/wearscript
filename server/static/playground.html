@@ -3,11 +3,7 @@
   <head>
     <title>WearScript: Playground</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href="static/codemirror.css" rel="stylesheet" media="screen">
-    <link href="static/bootstrap.min.css" rel="stylesheet" media="screen">
-    <link href="static/bootstrap-switch.css" rel="stylesheet" media="screen">
-    <link href="static/cube.css" rel="stylesheet" media="screen">
-    <link href="static/rickshaw.min.css" rel="stylesheet" media="screen">
+    <link href="static/style.css" rel="stylesheet" media="screen">
 <style type="text/css">
 .switch-wrap{ 
       float: left;
@@ -22,6 +18,7 @@
   </head>
   <body>
     <div class="container">
+        <div class="alert alert-info">The server has been updated to a new version incompatible with older clients, make sure you are using the latest client.</div>
         <div class="row">
           <div class="col-md-6">
             <h2>User</h2>
@@ -58,10 +55,15 @@
             <button class="btn btn-primary scriptel" type="button" id="resetButton">Reset</button>
             <button class="btn btn-primary scriptel" type="button" id="gistButton">Save to Gist</button>
             <button class="btn btn-primary scriptel" type="button" id="scriptButton">Wear This Script</button>
-            <button class="btn btn-primary scriptel" type="button" id="scriptDefaultButton">Set as default script</button>
+            <button class="btn btn-primary scriptel" type="button" id="scriptSaveButton">Save Script</button>
             <button class="btn btn-primary scriptel" type="button" id="scriptUrlButton">Wear Script From URL</button>
-            <div class="form-group">
+            <div class="input-group input-group-sm">
+                <span class="input-group-addon">Script URL</span>
               <input type="text" name="script-url" class="form-control" id="script-url" value="http://wearscript.com/colors.html"/>
+            </div>
+            <div class="input-group  input-group-sm">
+                <span class="input-group-addon">Script Name</span>
+              <input type="text" name="script-url" class="form-control" id="script-name" value="Default"/>
             </div>
           </form>
         </div>
@@ -69,9 +71,11 @@
       </div>
     </div>
 </div> <!-- /container -->
+<script src="static/compressed.js"></script>
 
-<script type="text/javascript" src="//ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
+<!--<script type="text/javascript" src="//ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
 <script src="static/reconnecting-websocket.min.js"></script>
+<script src="static/msgpack.js"></script>
 <script src="static/bootstrap.min.js"></script>
 <script src="static/codemirror.js"></script>
 <script src="static/bootstrap-switch.min.js"></script>
@@ -86,6 +90,7 @@
 <script src="static/htmlmixed.js"></script>
 <script type="text/javascript" src="//cdnjs.cloudflare.com/ajax/libs/underscore.js/1.4.4/underscore-min.js"></script>
 <script type="text/javascript" src="//cdnjs.cloudflare.com/ajax/libs/mustache.js/0.7.0/mustache.min.js"></script>
+-->
 <script type="text/javascript">
     $(function () {main("{{.WSUrl}}")});
 </script>

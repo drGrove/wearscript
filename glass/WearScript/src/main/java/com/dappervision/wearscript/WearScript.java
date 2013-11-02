@@ -1,13 +1,14 @@
 package com.dappervision.wearscript;
 
+import android.content.Intent;
 import android.util.Log;
 
-import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.JSONValue;
 import org.opencv.core.CvType;
 import org.opencv.core.Mat;
 
+import java.util.List;
 import java.util.TreeMap;
 
 public class WearScript {
@@ -54,7 +55,7 @@ public class WearScript {
     public void serverTimeline(String ti) {
         Log.i(TAG, "timeline");
         // TODO: Require WS connection
-        bs.serverTimeline((JSONObject) new JSONValue().parse(ti));
+        bs.serverTimeline(ti);
     }
 
     public boolean hasFlag(String flag) {
@@ -67,14 +68,16 @@ public class WearScript {
         bs.scriptImages.put(key, new Mat(height, width, CvType.CV_8UC4));
     }
 
+
     public void sensorOn(int type, double sampleTime) {
         Log.i(TAG, "sensorOn: " + Integer.toString(type));
-        bs.sensorOn(type, Math.round(sampleTime * 1000000000L));
+        bs.getDataManager().registerProvider(type, Math.round(sampleTime * 1000000000L));
     }
 
-    public void sensorCallback(String callback) {
-        Log.i(TAG, "sensorCallback: " + callback);
-        bs.sensorCallback = callback;
+    public void sensorOn(int type, double sampleTime, String callback) {
+        Log.i(TAG, "sensorOn: " + Integer.toString(type) + " callback: " + callback);
+        sensorOn(type, sampleTime);
+        bs.getDataManager().registerCallback(type, callback);
     }
 
     public void log(String msg) {
@@ -82,10 +85,9 @@ public class WearScript {
         bs.log(msg);
     }
 
-
     public void sensorOff(int type) {
         Log.i(TAG, "sensorOff: " + Integer.toString(type));
-        bs.sensorOff(type);
+        bs.getDataManager().unregister(type);
     }
 
     public void serverConnect(String server, String callback) {
@@ -141,24 +143,46 @@ public class WearScript {
 
     public void data(int type, String name, String values) {
         Log.i(TAG, "data");
-        JSONObject sensor = new JSONObject();
-        sensor.put("timestamp", System.currentTimeMillis() / 1000.);
-        sensor.put("type", new Integer(type));
-        sensor.put("name", name);
-        JSONArray valuesJS = (JSONArray) (new JSONValue()).parse(values);
-        sensor.put("values", valuesJS);
-        bs.sensorBuffer.add(sensor);
+
+        DataPoint dp = new DataPoint(name, type, System.currentTimeMillis() / 1000., System.nanoTime());
+        for (Double p : (List<Double>) JSONValue.parse(values)) {
+            dp.addValue(p);
+        }
+        bs.handleSensor(dp, null);
     }
 
     public void cameraOff() {
         bs.dataImage = false;
-        // TODO: Turn off camera
+        // NOTE(brandyn): This resets all callbacks, we should determine if that's the behavior we want
+        bs.getCameraManager().unregister(true);
+    }
+
+    public void cameraPhoto() {
+        this.bs.getCameraManager().cameraPhoto();
+    }
+
+    public void cameraVideo() {
+        this.bs.getCameraManager().cameraVideo();
     }
 
     public void cameraOn(double imagePeriod) {
         bs.dataImage = true;
         bs.imagePeriod = imagePeriod * 1000000000L;
-        // TODO: Turn on camera
+        bs.getCameraManager().register();
+    }
+
+    public void cameraCallback(int type, String callback) {
+        bs.getCameraManager().registerCallback(type, callback);
+    }
+
+    public void activityCreate() {
+        Intent i = new Intent(bs, MainActivity.class);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        bs.startActivity(i);
+    }
+
+    public void activityDestroy() {
+        bs.activity.get().finish();
     }
 
     public void wifiListenOff() {
@@ -173,5 +197,14 @@ public class WearScript {
         bs.dataRemote = server;
         bs.dataLocal = local;
         bs.sensorDelay = sensorDelay * 1000000000L;
+    }
+
+    public boolean scriptVersion(int version) {
+        if (version == 0) {
+            return false;
+        } else {
+            bs.say("Script version incompatible with client");
+            return true;
+        }
     }
 }

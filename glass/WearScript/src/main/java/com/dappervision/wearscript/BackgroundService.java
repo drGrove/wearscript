@@ -5,19 +5,11 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.location.Location;
-import android.location.LocationListener;
-import android.location.LocationManager;
 import android.media.AudioRecord;
-import android.net.wifi.ScanResult;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Binder;
-import android.os.Bundle;
 import android.os.Environment;
 import android.os.IBinder;
 import android.os.PowerManager;
@@ -25,64 +17,63 @@ import android.speech.tts.TextToSpeech;
 import android.speech.tts.TextToSpeech.OnInitListener;
 import android.util.Base64;
 import android.util.Log;
-import android.view.SurfaceView;
 import android.webkit.WebView;
+import android.webkit.WebChromeClient;
+import android.webkit.ConsoleMessage;
 
-import com.codebutler.android_websockets.WebSocketClient;
-
-import org.apache.http.message.BasicNameValuePair;
-import org.json.simple.JSONArray;
-import org.json.simple.JSONObject;
-import org.json.simple.JSONValue;
+import org.msgpack.MessagePack;
+import org.msgpack.type.ArrayValue;
+import org.msgpack.type.MapValue;
+import org.msgpack.type.Value;
+import org.msgpack.type.ValueFactory;
 import org.opencv.android.BaseLoaderCallback;
 import org.opencv.android.LoaderCallbackInterface;
 import org.opencv.android.OpenCVLoader;
-import org.opencv.core.CvType;
 import org.opencv.core.Mat;
-import org.opencv.core.MatOfByte;
-import org.opencv.highgui.Highgui;
-import org.opencv.imgproc.Imgproc;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.net.URI;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
-public class BackgroundService extends Service implements AudioRecord.OnRecordPositionUpdateListener, OnInitListener, SensorEventListener {
+import static org.msgpack.template.Templates.TValue;
+import static org.msgpack.template.Templates.tList;
+
+public class BackgroundService extends Service implements AudioRecord.OnRecordPositionUpdateListener, OnInitListener, SocketClient.SocketListener {
+    private static final boolean DBG = false;
     private final IBinder mBinder = new LocalBinder();
-    private final Object lock = new Object(); // All calls to webview, sensorSampleTimes, sensors, sensorSampleTimesLast, client must acquire lock
+    private final Object lock = new Object(); // All calls to webview client must acquire lock
     public WeakReference<MainActivity> activity;
     public boolean previewWarp = false, displayWeb = false;
     public Mat overlay;
-    public JSONArray sensorBuffer;
-    public JSONArray wifiBuffer;
+    //public JSONArray wifiBuffer;
     public TreeSet<String> flags;
-    public String sensorCallback, imageCallback;
     public boolean dataRemote, dataLocal, dataImage, dataWifi;
     public double lastSensorSaveTime, lastImageSaveTime, sensorDelay, imagePeriod;
-    protected String TAG = "WearScript";
+    protected static String TAG = "WearScript";
+    protected CameraManager cameraManager;
     protected TreeMap<String, Mat> scriptImages;
-    protected TreeMap<Integer, Sensor> sensors;
-    protected TreeMap<Integer, Long> sensorSampleTimesLast;
-    protected TreeMap<Integer, Long> sensorSampleTimes;
     protected TextToSpeech tts;
     protected ScreenBroadcastReceiver broadcastReceiver;
     protected String glassID;
-    protected WebSocketClient client;
+    MessagePack msgpack = new MessagePack();
+
+    protected SocketClient client;
     protected WebView webview;
-    protected LocationManager locationManager;
-    protected LocationListener locationListener;
-    protected SensorManager sensorManager;
-    protected int remoteImageAckCount, remoteImageCount;
+    protected DataManager dataManager;
     protected String wsUrl;
     protected PowerManager.WakeLock wakeLock;
     protected WifiManager wifiManager;
+    public TreeMap<String, ArrayList<Value>> sensorBuffer;
+    public TreeMap<String, Integer> sensorTypes;
     private BaseLoaderCallback mLoaderCallback = new BaseLoaderCallback(this) {
         @Override
         public void onManagerConnected(int status) {
@@ -111,89 +102,120 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
                 if (displayWeb && webview != null) {
                     a.setContentView(webview);
                 } else {
-                    a.setContentView(R.layout.surface_view);
-                    a.view = (JavaCameraView) a.findViewById(R.id.activity_java_surface_view);
-                    a.view.setVisibility(SurfaceView.VISIBLE);
-                    // NOTE(brandyn): Disabled due to XE10 camera break
-                    /*a.view.setCvCameraViewListener(a);
-                    a.view.enableView();*/
+
                 }
             }
         });
     }
 
-    public void handleSensor(JSONObject sensor) {
+    public DataManager getDataManager() {
+        return dataManager;
+    }
+
+    public CameraManager getCameraManager() {
+        return cameraManager;
+    }
+
+    public void loadUrl(String url) {
         synchronized (lock) {
-            if (sensorCallback != null && webview != null) {
-                webview.loadUrl(String.format("javascript:%s(%s);", sensorCallback, sensor.toJSONString()));
-            }
-        }
-        if (dataRemote || dataLocal) {
-            sensorBuffer.add(sensor);
-            if (System.nanoTime() - lastSensorSaveTime > sensorDelay) {
-                lastSensorSaveTime = System.nanoTime();
-                saveDataPacket(null);
+            if (webview != null && url != null) {
+                webview.loadUrl(url);
             }
         }
     }
 
-    @Override
-    public void onSensorChanged(SensorEvent event) {
-        Integer type = event.sensor.getType();
+    public void handleSensor(DataPoint dp, String url) {
         synchronized (lock) {
-            if (sensorSampleTimes == null || sensorSampleTimesLast == null)
-                return;
-            Long sampleTimeLast = sensorSampleTimesLast.get(type);
-            Long sampleTime = sensorSampleTimes.get(type);
-            if (sampleTimeLast == null || sampleTime == null || event.timestamp - sampleTimeLast < sampleTime)
-                return;
-            sensorSampleTimesLast.put(type, event.timestamp);
+            if (webview != null && url != null) {
+                webview.loadUrl(url);
+            }
+            if (dataRemote || dataLocal) {
+                Integer type = dp.getType();
+                String name = dp.getName();
+                if (!sensorBuffer.containsKey(name)) {
+                    sensorBuffer.put(name, new ArrayList<Value>());
+                    sensorTypes.put(name, type);
+                }
+                sensorBuffer.get(name).add(dp.getValue());
+                if (System.nanoTime() - lastSensorSaveTime > sensorDelay) {
+                    lastSensorSaveTime = System.nanoTime();
+                    saveSensors();
+                }
+            }
         }
-        JSONObject sensor = new JSONObject();
-        // NOTE(brandyn): The light sensor's timestampRaw is incorrect, this has been reported
-        // TODO(brandyn): Look into removing extra boxing, keep in mind we are buffering
-        sensor.put("timestamp", System.currentTimeMillis() / 1000.);
-        sensor.put("timestampRaw", new Long(event.timestamp));
-        sensor.put("type", new Integer(event.sensor.getType()));
-        sensor.put("name", event.sensor.getName());
-        JSONArray values = new JSONArray();
-        for (int i = 0; i < event.values.length; i++) {
-            values.add(new Float(event.values[i]));
-        }
-        sensor.put("values", values);
-        handleSensor(sensor);
     }
 
-    public void saveDataPacket(final Mat frame) {
-        final JSONArray curSensorBuffer = sensorBuffer;
-        final JSONArray curWifiBuffer = wifiBuffer;
-        final Double Tsave = new Double(System.currentTimeMillis() / 1000.);
-        sensorBuffer = new JSONArray();
-        wifiBuffer = new JSONArray();
+    public void saveSensors() {
+        final TreeMap<String, ArrayList<Value>> curSensorBuffer = sensorBuffer;
+        if (curSensorBuffer.isEmpty())
+            return;
+        sensorBuffer = new TreeMap<String, ArrayList<Value>>();
 
-        JSONObject data = new JSONObject();
-        if (frame != null) {
-            Log.i(TAG, "Got frame:" + frame.size().toString());
-            MatOfByte jpgFrame = new MatOfByte();
-            Highgui.imencode(".jpg", frame, jpgFrame);
-            final byte[] out = jpgFrame.toArray();
-            data.put("imageb64", Base64.encodeToString(out, Base64.NO_WRAP));
+        List<Value> output = new ArrayList<Value>();
+        output.add(ValueFactory.createRawValue("sensors"));
+        output.add(ValueFactory.createRawValue(glassID));
+        ArrayList<Value> sensorTypes = new ArrayList();
+        for (String k : this.sensorTypes.navigableKeySet()) {
+            sensorTypes.add(ValueFactory.createRawValue(k));
+            sensorTypes.add(ValueFactory.createIntegerValue(this.sensorTypes.get(k)));
         }
-        if (!curSensorBuffer.isEmpty())
-            data.put("sensors", curSensorBuffer);
-        if (!wifiBuffer.isEmpty())
-            data.put("wifi", wifiBuffer);
-        data.put("Tsave", Tsave);
-        data.put("Tg0", new Double(System.currentTimeMillis() / 1000.));
-        data.put("glassID", glassID);
-        data.put("action", "data");
-        final String dataStr = data.toJSONString();
+        output.add(ValueFactory.createMapValue(sensorTypes.toArray(new Value[0])));
+
+        ArrayList<Value> sensors = new ArrayList();
+        for (String k : curSensorBuffer.navigableKeySet()) {
+            sensors.add(ValueFactory.createRawValue(k));
+            sensors.add(ValueFactory.createArrayValue(curSensorBuffer.get(k).toArray(new Value[0])));
+        }
+        output.add(ValueFactory.createMapValue(sensors.toArray(new Value[0])));
+
+        final byte[] dataStr;
+        try {
+            dataStr = msgpack.write(output);
+        } catch (IOException e) {
+            Log.e(TAG, "Couldn't serialize msgpack");
+            e.printStackTrace();
+            return;
+        }
         if (dataLocal) {
-            SaveData(dataStr.getBytes(), "data/", true, ".js");
+            SaveData(dataStr, "data/", true, ".msgpack");
         }
         if (dataRemote) {
-            if (frame != null)
-                remoteImageCount++;
+            if (clientConnected())
+                synchronized (lock) {
+                    client.send(dataStr);
+                }
+        }
+    }
+
+    public void handleImage(final CameraManager.CameraFrame frame) {
+        // TODO(brandyn): Move this timing logic into the camera manager
+        if (!dataImage || System.nanoTime() - lastImageSaveTime < imagePeriod)
+            return;
+        lastImageSaveTime = System.nanoTime();
+        byte[] frameJPEG = frame.getJPEG();
+        if (webview != null) {
+            String jsCallback = cameraManager.buildCallbackString(0, frameJPEG);
+            if (jsCallback != null)
+                webview.loadUrl(jsCallback);
+        }
+        if (dataLocal) {
+            // TODO(brandyn): We can improve timestamp precision by capturing it pre-encoding
+            SaveData(frameJPEG, "data/", true, ".jpg");
+        }
+        if (dataRemote) {
+            List<Value> output = new ArrayList<Value>();
+            output.add(ValueFactory.createRawValue("image"));
+            output.add(ValueFactory.createRawValue(glassID));
+            output.add(ValueFactory.createFloatValue(System.currentTimeMillis() / 1000.));
+            output.add(ValueFactory.createRawValue(frameJPEG));
+            final byte[] dataStr;
+            try {
+                dataStr = msgpack.write(output);
+            } catch (IOException e) {
+                Log.e(TAG, "Couldn't serialize msgpack");
+                e.printStackTrace();
+                return;
+            }
             if (clientConnected())
                 synchronized (lock) {
                     client.send(dataStr);
@@ -206,16 +228,10 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
             if (client == null)
                 return false;
             if (!client.isConnected()) {
-                remoteImageAckCount = remoteImageCount = 0;
                 client.connect();
             }
             return client.isConnected();
         }
-    }
-
-    @Override
-    public void onAccuracyChanged(Sensor sensor, int i) {
-
     }
 
     public void shutdown() {
@@ -249,56 +265,29 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
             }
             flags = new TreeSet<String>();
             scriptImages = new TreeMap<String, Mat>();
-            TreeMap<Integer, Sensor> sensorsPrev = sensors;
-            if (sensors != null) {
-                for (Integer type : (new TreeSet<Integer>(sensors.navigableKeySet()))) {
-                    sensorOff(type);
-                }
-            }
-            sensors = new TreeMap<Integer, Sensor>();
-            sensorBuffer = new JSONArray();
-            wifiBuffer = new JSONArray();
+            sensorBuffer = new TreeMap<String, ArrayList<Value>>();
+            sensorTypes = new TreeMap<String, Integer>();
+            //wifiBuffer = new JSONArray();
             overlay = null;
-            sensorSampleTimes = new TreeMap<Integer, Long>();
-            sensorSampleTimesLast = new TreeMap<Integer, Long>();
             dataWifi = previewWarp = dataRemote = dataLocal = dataImage = false;
             displayWeb = true;
-            sensorCallback = null;
             lastSensorSaveTime = lastImageSaveTime = sensorDelay = imagePeriod = 0.;
-            sensorManager.unregisterListener(this);
-            remoteImageAckCount = remoteImageCount = 0;
+            dataManager.unregister();
+            cameraManager.unregister(true);
             updateActivityView();
         }
     }
 
     public void startDefaultScript() {
-        byte [] defaultScriptArray = LoadData("", "default.html");
-        if (defaultScriptArray == null) {
-            runScript("<script>function s() {WS.say('Connected')};window.onload=function () {WS.serverConnect('{{WSUrl}}', 's')}</script>");
-        } else {
-            runScript(new String(defaultScriptArray));
-        }
-    }
-
-    public void directStartScriptUrl(final String url) {
-        if (activity == null)
-            return;
-        final MainActivity a = activity.get();
-        if (a == null)
-            return;
-        a.runOnUiThread(new Thread() {
-            public void run() {
-                runScriptUrl(url);
-            }
-        });
+        runScript("<script>function s() {WS.say('Connected')};window.onload=function () {WS.serverConnect('{{WSUrl}}', 's')}</script>");
     }
 
     public void serverConnect(String url, final String callback) {
         Log.i(TAG, "WS Setup");
-        List<BasicNameValuePair> extraHeaders = Arrays.asList();
         synchronized (lock) {
             if (url.equals("{{WSUrl}}"))
                 url = wsUrl;
+
             if (client != null && client.isConnected() && wsUrl.equals(url)) {
                 Log.i(TAG, "WS Reusing client and calling callback");
                 if (callback != null && webview != null) {
@@ -306,153 +295,161 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
                 }
                 return;
             }
+
+            //We are starting a new connection or switching URLs.
             if (client != null) {
                 client.disconnect();
                 client = null;
             }
             wsUrl = url;
-            client = new WebSocketClient(URI.create(url), new WebSocketClient.Listener() {
-                private String cb = callback;
-
-                @Override
-                public void onConnect() {
-                    Log.i(TAG, "WS Connected!");
-                    remoteImageAckCount = remoteImageCount = 0;
-                    synchronized (lock) {
-                        if (cb != null && webview != null) {
-                            webview.loadUrl(String.format("javascript:%s();", cb));
-                            cb = null;
-                        }
-                    }
-                }
-
-                @Override
-                public void onMessage(String message) {
-                    try {
-                        JSONObject o = (JSONObject) JSONValue.parse(message);
-
-                        String action = (String) o.get("action");
-                        Log.i(TAG, String.format("Got %s", action));
-                        // TODO: String to Mat, save and display in the loopback thread
-                        if (action.equals("startScript") || action.equals("defaultScript")) {
-                            final String script = (String) o.get("script");
-                            Log.i(TAG, "WebView:" + Integer.toString(script.length()));
-                            if (activity == null)
-                                return;
-                            final MainActivity a = activity.get();
-                            if (a == null)
-                                return;
-                            if (action.equals("defaultScript"))
-                                SaveData(script.getBytes(), "", false, "default.html");
-                            a.runOnUiThread(new Thread() {
-                                public void run() {
-                                    runScript(script);
-                                }
-                            });
-                        } else if (action.equals("startScriptUrl")) {
-                            final String url = (String) o.get("scriptUrl");
-
-                            if (activity == null)
-                                return;
-                            final MainActivity a = activity.get();
-                            if (a == null)
-                                return;
-                            a.runOnUiThread(new Thread() {
-                                public void run() {
-                                    runScriptUrl(url);
-                                }
-                            });
-                        } else if (action.equals("pingStatus")) {
-                            o.put("action", "pongStatus");
-                            o.put("glassID", glassID);
-                            // Display: On/Off  Activity Visible: True/False, Sensor Count (Raw): Map<Integer, Integer>, Sensor Count (Saved): Map<Integer, Integer>
-                            // Javascript: ?
-                            synchronized (lock) {
-                                client.send(o.toJSONString());
-                            }
-                        } else if (action.equals("data")) {
-                            for (Object sensor : (JSONArray) o.get("sensors")) {
-                                JSONObject s = (JSONObject) sensor;
-                                int sensorType = ((Long) s.get("type")).intValue();
-                                synchronized (lock) {
-                                    if (sensorType < 0 && sensors.containsKey(sensorType))
-                                        handleSensor(s);
-                                }
-                            }
-                        } else if (action.equals("shutdown")) {
-                            Log.i(TAG, "Shutting down!");
-                            shutdown();
-                        } else if (action.equals("ping")) {
-                            remoteImageAckCount++;
-                            o.put("action", "pong");
-                            o.put("Tg1", new Double(System.currentTimeMillis() / 1000.));
-                            synchronized (lock) {
-                                client.send(o.toJSONString());
-                            }
-                        } else if (action.equals("flags")) {
-                            JSONArray a = (JSONArray) o.get("flags");
-                            if (a != null)
-                                flags = new TreeSet<String>((List<String>) a);
-                        }
-                        Log.d(TAG, String.format("WS: Got string message! %d", message.length()));
-                    } catch (Exception e) {
-                        Log.e(TAG, e.toString());
-                    }
-                }
-
-                @Override
-                public void onDisconnect(int code, String reason) {
-                    Log.d(TAG, String.format("WS: Disconnected! Code: %d Reason: %s", code, reason));
-                    synchronized (lock) {
-                        if (client == null || client.getListener() != this)
-                            return;
-                    }
-                    remoteImageAckCount = remoteImageCount = 0;
-                    new Thread(new Runnable() {
-                        public void run() {
-                            ReconnectClient(client);
-                        }
-                    }).start();
-                }
-
-                @Override
-                public void onError(Exception error) {
-                    Log.e(TAG, "WS: Error!", error);
-                }
-
-                @Override
-                public void onMessage(byte[] arg0) {
-                    // TODO Auto-generated method stub
-
-                }
-
-            }, extraHeaders);
+            client = new SocketClient(URI.create(url), this, callback);
             client.connect();
         }
     }
 
-    protected void ReconnectClient(WebSocketClient client) {
+    public void onSocketConnect(String cb) {
+        Log.i(TAG, "WS Connected!");
         synchronized (lock) {
-            if (client == null)
-                return;
-        }
-        while (true) {
-            synchronized (lock) {
-                if (client.isConnected())
-                    break;
-                client.connect();
-            }
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
+            if (cb != null && webview != null) {
+                webview.loadUrl(String.format("javascript:%s();", cb));
             }
         }
     }
 
-    protected String SaveData(byte[] data, String path, boolean timestamp, String suffix) {
+    public void onSocketMessage(byte[] message) {
+        try {
+            Log.i(TAG, "0: " + Base64.encodeToString(message, Base64.NO_WRAP));
+            List<Value> input = msgpack.read(message, tList(TValue));
+            String action = input.get(0).asRawValue().getString();
+            Log.i(TAG, String.format("Got %s", action));
+            // TODO: String to Mat, save and display in the loopback thread
+            if (action.equals("startScript")) {
+                final String script = input.get(1).asRawValue().getString();
+                Log.i(TAG, "WebView:" + Integer.toString(script.length()));
+                if (activity == null)
+                    return;
+                final MainActivity a = activity.get();
+                if (a == null)
+                    return;
+                a.runOnUiThread(new Thread() {
+                    public void run() {
+                        runScript(script);
+                    }
+                });
+            } else if (action.equals("saveScript")) {
+                final String script = input.get(1).asRawValue().getString();
+                final String name = input.get(2).asRawValue().getString();
+                Pattern p = Pattern.compile("[^a-zA-Z0-9]");
+                if (name == null || name.isEmpty() || p.matcher(name).find()) {
+                    Log.w(TAG, "Unable to save script");
+                    return;
+                }
+                SaveData(script.getBytes(), "scripts/", false, name + ".html");
+            } else if (action.equals("startScriptUrl")) {
+                final String url = input.get(1).asRawValue().getString();
+                if (activity == null)
+                    return;
+                final MainActivity a = activity.get();
+                if (a == null)
+                    return;
+                a.runOnUiThread(new Thread() {
+                    public void run() {
+                        runScriptUrl(url);
+
+                    }
+                });
+            } else if (action.equals("pingStatus")) {
+                List<Value> output = new ArrayList<Value>();
+                output.add(ValueFactory.createRawValue("pongStatus"));
+                output.add(ValueFactory.createRawValue(glassID));
+                // Display: On/Off  Activity Visible: True/False, Sensor Count (Raw): Map<Integer, Integer>, Sensor Count (Saved): Map<Integer, Integer>
+                // Javascript: ?
+                synchronized (lock) {
+                    client.send(msgpack.write(output));
+                }
+            } else if (action.equals("sensors")) {
+                TreeMap<String, Integer> types = new TreeMap<String, Integer>();
+                Value[] typesKeyValues = input.get(2).asMapValue().getKeyValueArray();
+                Log.w(TAG, "Msgpack: 0");
+
+                for (int i = 0; i < typesKeyValues.length / 2; i++)
+                    types.put(typesKeyValues[i * 2].asRawValue().getString(), typesKeyValues[i * 2 + 1].asIntegerValue().getInt());
+                Log.w(TAG, "Msgpack: 1");
+
+                Value[] samplesKeyValues = input.get(3).asMapValue().getKeyValueArray();
+                for (int i = 0; i < samplesKeyValues.length / 2; i++) {
+                    Log.w(TAG, "Msgpack: 2");
+                    String name = samplesKeyValues[i * 2].asRawValue().getString();
+                    Integer type = types.get(name);
+                    if (type == null) {
+                        Log.w(TAG, "Unknown type in sensors: " + name);
+                        continue;
+                    }
+                    Log.w(TAG, "Msgpack: 3");
+
+                    Value[] samples = samplesKeyValues[i * 2 + 1].asArrayValue().getElementArray();
+                    for (int j = 0; j < samples.length; j++) {
+                        ArrayValue sample = samples[j].asArrayValue();
+                        Log.w(TAG, "Msgpack: 4");
+                        DataPoint dp = new DataPoint(name, type, sample.get(1).asFloatValue().getDouble(), sample.get(2).asIntegerValue().getLong());
+                        Log.w(TAG, "Msgpack: 5");
+
+                        for (Value k : sample.get(0).asArrayValue().getElementArray()) {
+                            Log.w(TAG, "Msgpack: 6");
+                            dp.addValue(k.asFloatValue().getDouble());
+                        }
+                        dataManager.queueRemote(dp);
+                    }
+                }
+            } else if (action.equals("image")) {
+                if (webview != null) {
+                    String jsCallback = cameraManager.buildCallbackString(1, input.get(3).asRawValue().getByteArray());
+                    if (jsCallback != null)
+                        webview.loadUrl(jsCallback);
+                }
+            } else if (action.equals("version")) {
+                int versionExpected = 0;
+                int version = input.get(1).asIntegerValue().getInt();
+                if (version != versionExpected) {
+                    say("Version mismatch!  Got " + version + " and expected " + versionExpected + ".  Visit wear script .com for information.");
+                }
+            } else if (action.equals("shutdown")) {
+                Log.i(TAG, "Shutting down!");
+                shutdown();
+            } else if (action.equals("ping")) {
+                /*remoteImageAckCount++;
+                WSDataPong data = new WSDataPong();
+                data.timestamp = System.currentTimeMillis() / 1000.;
+                //o.action = "pong";
+                //o.Tg1 = new Double(System.currentTimeMillis() / 1000.);
+                synchronized (lock) {
+                    client.send(msgpack.write(data));
+                }
+                */
+            }
+            Log.d(TAG, String.format("WS: Got string message! %d", message.length));
+        } catch (Exception e) {
+            Log.e(TAG, e.toString());
+        }
+    }
+
+    public void onSocketDisconnect(int code, String reason) {
+        Log.d(TAG, String.format("WS: Disconnected! Code: %d Reason: %s", code, reason));
+        synchronized (lock) {
+            if (client == null || client.getListener() != this)
+                return;
+        }
+        client.reconnect();
+    }
+
+    public void onSocketError(Exception error) {
+        Log.e(TAG, "WS: Connection Error!", error);
+    }
+
+    static protected String SaveData(byte[] data, String path, boolean timestamp, String suffix) {
         try {
             try {
-                File dir = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/wearscript/" + path);
+                File dir = new File(dataPath() + path);
                 dir.mkdirs();
                 File file;
                 if (timestamp)
@@ -468,15 +465,19 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
                 return null;
             }
         } catch (Exception e) {
-            Log.e(TAG, "Bad disc");
+            Log.e("SaveData", "Bad disc");
             return null;
         }
+    }
+
+    static public String dataPath() {
+        return Environment.getExternalStorageDirectory().getAbsolutePath() + "/wearscript/";
     }
 
     protected byte[] LoadData(String path, String suffix) {
         try {
             try {
-                File dir = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/wearscript/" + path);
+                File dir = new File(dataPath() + path);
                 File file;
                 file = new File(dir, suffix);
                 FileInputStream inputStream = new FileInputStream(file);
@@ -499,6 +500,14 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
         synchronized (lock) {
             // TODO(brandyn): Refactor these as they are similar
             webview = new WebView(this);
+            webview.setWebChromeClient(new WebChromeClient() {
+                public boolean onConsoleMessage(ConsoleMessage cm) {
+                    Log.d("WearScriptWebView", cm.message() + " -- From line "
+                            + cm.lineNumber() + " of "
+                            + cm.sourceId() );
+                    return true;
+                }
+            });
             webview.getSettings().setJavaScriptEnabled(true);
             webview.addJavascriptInterface(new WearScript(this), "WS");
             Log.i(TAG, "WebView:" + script);
@@ -515,6 +524,14 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
         synchronized (lock) {
             // TODO(brandyn): Refactor these as they are similar
             webview = new WebView(this);
+            webview.setWebChromeClient(new WebChromeClient() {
+                public boolean onConsoleMessage(ConsoleMessage cm) {
+                    Log.d("WearScriptWebView", cm.message() + " -- From line "
+                            + cm.lineNumber() + " of "
+                            + cm.sourceId() );
+                    return true;
+                }
+            });
             webview.getSettings().setJavaScriptEnabled(true);
             webview.addJavascriptInterface(new WearScript(this), "WS");
             Log.i(TAG, "WebView:" + url);
@@ -552,12 +569,14 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
         tts = new TextToSpeech(this, this);
         wifiManager = (WifiManager) getSystemService(Context.WIFI_SERVICE);
         glassID = getMacAddress();
-        sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        dataManager = new DataManager((SensorManager) getSystemService(SENSOR_SERVICE), this);
+        cameraManager = new CameraManager(this);
         OpenCVLoader.initAsync(OpenCVLoader.OPENCV_VERSION_2_4_3, this, mLoaderCallback);
     }
 
     public void wifiScanResults() {
         Double timestamp = System.currentTimeMillis() / 1000.;
+        /*
         for (ScanResult s : wifiManager.getScanResults()) {
             JSONObject r = new JSONObject();
             r.put("timestamp", timestamp);
@@ -569,77 +588,11 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
             if (dataWifi)
                 wifiBuffer.add(r);
         }
+        */
     }
 
     public void wifiStartScan() {
         wifiManager.startScan();
-    }
-
-    public void sensorOn(int type, long sampleTime) {
-        synchronized (lock) {
-            if (sensors.containsKey(type))
-                return;
-
-            sensorSampleTimes.put(type, sampleTime);
-            sensorSampleTimesLast.put(type, 0L);
-
-            if (type < -1) // Custom
-                sensors.put(type, null);
-            if (type == -1) { // GPS
-                locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-                locationListener = new LocationListener() {
-                    @Override
-                    public void onLocationChanged(Location l) {
-                        JSONObject sensor = new JSONObject();
-                        sensor.put("timestamp", System.currentTimeMillis() / 1000.);
-                        sensor.put("type", new Integer(-1));
-                        sensor.put("name", "GPS");
-                        JSONArray values = new JSONArray();
-                        values.add(new Float(l.getLatitude()));
-                        values.add(new Float(l.getLongitude()));
-                        values.add(new Float(l.getBearing()));
-                        values.add(new Float(l.getSpeed()));
-                        sensor.put("values", values);
-                        handleSensor(sensor);
-                    }
-
-                    @Override
-                    public void onProviderDisabled(String provider) {
-                    }
-
-                    @Override
-                    public void onProviderEnabled(String provider) {
-                    }
-
-                    @Override
-                    public void onStatusChanged(String provider, int status, Bundle extras) {
-                    }
-                };
-                for (String provider : locationManager.getAllProviders())
-                    if (locationManager.isProviderEnabled(provider))
-                        locationManager.requestLocationUpdates(provider, 10000, 0, locationListener);
-            } else { // Standard Android Sensors
-                Sensor s = sensorManager.getDefaultSensor(type);
-                sensors.put(type, s);
-                sensorManager.registerListener(this, s, SensorManager.SENSOR_DELAY_GAME);
-            }
-        }
-    }
-
-    public void sensorOff(int type) {
-        synchronized (lock) {
-            if (!sensors.containsKey(type))
-                return;
-            Sensor s = sensors.get(type);
-            sensors.remove(type);
-            if (type == -1) {  // GPS
-                locationManager.removeUpdates(locationListener);
-                locationManager = null;
-                locationListener = null;
-            }
-            if (s != null)
-                sensorManager.unregisterListener(this, s);
-        }
     }
 
     @Override
@@ -654,57 +607,55 @@ public class BackgroundService extends Service implements AudioRecord.OnRecordPo
         if (broadcastReceiver != null)
             unregisterReceiver(broadcastReceiver);
         //wakeLock.release();
+        if (cameraManager != null) {
+            cameraManager.unregister(true);
+        }
         if (tts != null) {
             tts.stop();
             tts.shutdown();
         }
+        shutdown();
+        super.onDestroy();
     }
 
-    public void serverTimeline(JSONObject ti) {
-        Log.i(TAG, "Timeline: " + ti.toJSONString());
-        JSONObject data = new JSONObject();
-        data.put("action", "timeline");
-        data.put("ti", ti);
+    public void serverTimeline(String ti) {
         synchronized (lock) {
-            client.send(data.toJSONString());
+            if (client != null && client.isConnected()) {
+                List<Value> output = new ArrayList<Value>();
+                output.add(ValueFactory.createRawValue("timeline"));
+                output.add(ValueFactory.createRawValue(ti));
+                try {
+                    client.send(msgpack.write(output));
+                } catch (IOException e) {
+                    Log.e(TAG, "serverTimeline: Couldn't serialize msgpack");
+                }
+            }
         }
     }
 
     public void log(String m) {
         synchronized (lock) {
             if (client != null && client.isConnected()) {
-                JSONObject data = new JSONObject();
-                data.put("action", "log");
-                data.put("message", m);
-                client.send(data.toJSONString());
+                List<Value> output = new ArrayList<Value>();
+                output.add(ValueFactory.createRawValue("log"));
+                output.add(ValueFactory.createRawValue(m));
+                try {
+                    client.send(msgpack.write(output));
+                } catch (IOException e) {
+                    Log.e(TAG, "serverTimeline: Couldn't serialize msgpack");
+                }
             }
         }
     }
 
     @Override
     public void onMarkerReached(AudioRecord arg0) {
-        // TODO Auto-generated method stub
         Log.i(TAG, "Audio mark");
     }
 
     @Override
     public void onPeriodicNotification(AudioRecord arg0) {
-        // TODO Auto-generated method stub
         Log.i(TAG, "Audio period");
-    }
-
-    protected Mat ImageBGRFromString(String dataB64) {
-        byte[] data = Base64.decode(dataB64, Base64.NO_WRAP);
-        Mat frame = new Mat(1, data.length, CvType.CV_8UC1);
-        frame.put(0, 0, data);
-        return Highgui.imdecode(frame, 1);
-    }
-
-    protected Mat ImageRGBAFromString(String data) {
-        Mat frameBGR = ImageBGRFromString(data);
-        Mat frameRGBA = new Mat(frameBGR.rows(), frameBGR.cols(), CvType.CV_8UC4);
-        Imgproc.cvtColor(frameBGR, frameRGBA, Imgproc.COLOR_BGR2RGBA);
-        return frameRGBA;
     }
 
     public void say(String text) {
